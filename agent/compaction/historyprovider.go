@@ -64,6 +64,11 @@ type historyProviderSessionLocks struct {
 	nullSessionLock sync.Mutex
 }
 
+type historyProvider struct {
+	config HistoryProviderConfig
+	locks  *historyProviderSessionLocks
+}
+
 func (l *historyProviderSessionLocks) forOptions(options []agent.Option) *sync.Mutex {
 	session, _ := agent.GetOption(options, agent.WithSession)
 	if session == nil {
@@ -93,65 +98,112 @@ func NewHistoryProvider(cfg HistoryProviderConfig) agent.HistoryProvider {
 	}
 	cfg.SourceID = cmp.Or(cfg.SourceID, defaultHistoryProviderSourceID)
 	cfg.StateKey = cmp.Or(cfg.StateKey, cfg.SourceID)
-	locks := new(historyProviderSessionLocks)
+	return &historyProvider{config: cfg, locks: new(historyProviderSessionLocks)}
+}
 
-	return agent.NewHistoryProvider(agent.HistoryProviderConfig{
-		SourceID:                        cfg.SourceID,
-		ProvideOutputMessageFilter:      cfg.ProvideOutputMessageFilter,
-		StoreInputRequestMessageFilter:  cfg.StoreInputRequestMessageFilter,
-		StoreInputResponseMessageFilter: cfg.StoreInputResponseMessageFilter,
-		Provide: func(ctx context.Context, invoking agent.InvokingContext) ([]*message.Message, error) {
-			mu := locks.forOptions(invoking.Options)
-			mu.Lock()
-			defer mu.Unlock()
+func (p *historyProvider) Invoking(ctx context.Context, invoking agent.InvokingContext) ([]*message.Message, error) {
+	mu := p.locks.forOptions(invoking.Options)
+	mu.Lock()
+	defer mu.Unlock()
 
-			session, _ := agent.GetOption(invoking.Options, agent.WithSession)
-			if session == nil {
-				return nil, nil
-			}
-			state, err := getHistoryProviderState(session, cfg.StateKey, cfg.StateInitializer)
-			if err != nil {
-				return nil, err
-			}
-			if len(state.Messages) == 0 {
-				return nil, nil
-			}
+	session, _ := agent.GetOption(invoking.Options, agent.WithSession)
+	if session == nil {
+		return invoking.Messages, nil
+	}
+	state, err := getHistoryProviderState(session, p.config.StateKey, p.config.StateInitializer)
+	if err != nil {
+		return nil, err
+	}
 
-			compacted, err := compactHistory(ctx, cfg.Strategy, state.Messages, cfg.TokenCounter, cfg.Logger)
-			if err != nil {
-				return nil, err
-			}
-			state.Messages = slices.Clone(compacted)
-			session.Set(cfg.StateKey, state)
-			return slices.Clone(compacted), nil
-		},
-		Store: func(ctx context.Context, invoked agent.InvokedContext) error {
-			mu := locks.forOptions(invoked.Options)
-			mu.Lock()
-			defer mu.Unlock()
+	history := slices.Clone(state.Messages)
+	if p.config.ProvideOutputMessageFilter != nil {
+		history, err = p.config.ProvideOutputMessageFilter(ctx, history)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-			session, _ := agent.GetOption(invoked.Options, agent.WithSession)
-			if session == nil {
-				return nil
-			}
-			state, err := getHistoryProviderState(session, cfg.StateKey, cfg.StateInitializer)
-			if err != nil {
-				return err
-			}
+	source := message.Source{Type: agent.SourceTypeHistoryProvider, ID: p.config.SourceID}
+	messages := make([]*message.Message, 0, len(history)+len(invoking.Messages))
+	for _, msg := range history {
+		if msg == nil {
+			messages = append(messages, nil)
+		} else {
+			messages = append(messages, msg.WithSource(source))
+		}
+	}
+	messages = append(messages, invoking.Messages...)
 
-			messages := slices.Clone(state.Messages)
-			messages = append(messages, invoked.RequestMessages...)
-			messages = append(messages, invoked.ResponseMessages...)
+	compacted, err := compactHistory(ctx, p.config.Strategy, messages, p.config.TokenCounter, p.config.Logger)
+	if err != nil {
+		return nil, err
+	}
+	inputMessages := make(map[*message.Message]struct{}, len(invoking.Messages))
+	for _, msg := range invoking.Messages {
+		inputMessages[msg] = struct{}{}
+	}
+	for i, msg := range compacted {
+		if msg == nil || msg.Source == source {
+			continue
+		}
+		if _, ok := inputMessages[msg]; !ok {
+			compacted[i] = msg.WithSource(source)
+		}
+	}
+	return compacted, nil
+}
 
-			compacted, err := compactHistory(ctx, cfg.Strategy, messages, cfg.TokenCounter, cfg.Logger)
-			if err != nil {
-				return err
-			}
-			state.Messages = slices.Clone(compacted)
-			session.Set(cfg.StateKey, state)
-			return nil
-		},
-	})
+func (p *historyProvider) Invoked(ctx context.Context, invoked agent.InvokedContext) error {
+	if invoked.Err != nil {
+		return nil
+	}
+
+	requestFilter := p.config.StoreInputRequestMessageFilter
+	if requestFilter == nil {
+		requestFilter = messagefilter.NotSourceTypes(agent.SourceTypeHistoryProvider)
+	}
+	filteredRequest, err := requestFilter(ctx, slices.Clone(invoked.RequestMessages))
+	if err != nil {
+		return err
+	}
+	filteredResponse := invoked.ResponseMessages
+	if p.config.StoreInputResponseMessageFilter != nil {
+		filteredResponse, err = p.config.StoreInputResponseMessageFilter(ctx, slices.Clone(invoked.ResponseMessages))
+		if err != nil {
+			return err
+		}
+	}
+
+	mu := p.locks.forOptions(invoked.Options)
+	mu.Lock()
+	defer mu.Unlock()
+
+	session, _ := agent.GetOption(invoked.Options, agent.WithSession)
+	if session == nil {
+		return nil
+	}
+	state, err := getHistoryProviderState(session, p.config.StateKey, p.config.StateInitializer)
+	if err != nil {
+		return err
+	}
+
+	messages := slices.Clone(state.Messages)
+	if p.config.ProvideOutputMessageFilter != nil {
+		messages, err = p.config.ProvideOutputMessageFilter(ctx, messages)
+		if err != nil {
+			return err
+		}
+	}
+	messages = append(messages, filteredRequest...)
+	messages = append(messages, filteredResponse...)
+
+	compacted, err := compactHistory(ctx, p.config.Strategy, messages, p.config.TokenCounter, p.config.Logger)
+	if err != nil {
+		return err
+	}
+	state.Messages = slices.Clone(compacted)
+	session.Set(p.config.StateKey, state)
+	return nil
 }
 
 func getHistoryProviderState(session *agent.Session, stateKey string, initializer func(*agent.Session) []*message.Message) (historyProviderState, error) {

@@ -12,6 +12,7 @@ import (
 	"github.com/microsoft/agent-framework-go/agent/compaction"
 	"github.com/microsoft/agent-framework-go/internal/agenttest"
 	"github.com/microsoft/agent-framework-go/message"
+	"github.com/microsoft/agent-framework-go/message/messagefilter"
 )
 
 func invokeHistoryProvider(provider agent.HistoryProvider, ctx context.Context, messages []*message.Message, options ...agent.Option) ([]*message.Message, error) {
@@ -44,9 +45,10 @@ func TestNewHistoryProvider_CompactsPersistedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load history: %v", err)
 	}
-	if got, want := messageTexts(loaded), []string{"u2", "a2", "u3"}; !slices.Equal(got, want) {
+	if got, want := messageTexts(loaded), []string{"a2", "u3"}; !slices.Equal(got, want) {
 		t.Fatalf("loaded history = %v, want %v", got, want)
 	}
+
 	if got, want := loaded[0].Source, (message.Source{Type: agent.SourceTypeHistoryProvider, ID: "compaction-history"}); got != want {
 		t.Fatalf("history source = %#v, want %#v", got, want)
 	}
@@ -68,6 +70,44 @@ func TestNewHistoryProvider_CompactsPersistedHistory(t *testing.T) {
 	}
 	if got, want := messageTexts(state.Messages), []string{"u2", "a2"}; !slices.Equal(got, want) {
 		t.Fatalf("persisted history = %v, want %v", got, want)
+	}
+}
+
+func TestNewHistoryProvider_FiltersHistoryBeforeSummarization(t *testing.T) {
+	session := agenttest.CreateSession()
+	minimumPreservedGroups := 2
+	secret := textMessage(message.RoleUser, "secret")
+	secret.Source = message.Source{Type: agent.SourceTypeContextProvider, ID: "private"}
+	var summarized []*message.Message
+	provider := compaction.NewHistoryProvider(compaction.HistoryProviderConfig{
+		SourceID: "compaction-history",
+		StateInitializer: func(*agent.Session) []*message.Message {
+			return []*message.Message{
+				secret,
+				textMessage(message.RoleAssistant, "visible 1"),
+				textMessage(message.RoleUser, "visible 2"),
+			}
+		},
+		ProvideOutputMessageFilter: messagefilter.ExternalOnly,
+		Strategy: &compaction.SummarizationStrategy{
+			Trigger: compaction.GroupsExceed(2),
+			Summarizer: compaction.SummarizerFunc(func(_ context.Context, messages []*message.Message) (string, error) {
+				summarized = slices.Clone(messages)
+				return "visible context", nil
+			}),
+			MinimumPreservedGroups: &minimumPreservedGroups,
+		},
+	})
+
+	loaded, err := invokeHistoryProvider(provider, t.Context(), []*message.Message{textMessage(message.RoleUser, "current")}, agent.WithSession(session))
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if got, want := messageTexts(loaded), []string{"[Summary]\nvisible context", "visible 2", "current"}; !slices.Equal(got, want) {
+		t.Fatalf("loaded history = %v, want %v", got, want)
+	}
+	if slices.Contains(messageTexts(summarized), "secret") {
+		t.Fatalf("filtered message was summarized: %v", messageTexts(summarized))
 	}
 }
 
@@ -94,7 +134,7 @@ func TestNewHistoryProvider_LoadsCompactedSummaryAsHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load history: %v", err)
 	}
-	if got, want := messageTexts(loaded), []string{"[Summary]\nolder context", "u2", "a2", "u3"}; !slices.Equal(got, want) {
+	if got, want := messageTexts(loaded), []string{"[Summary]\nolder context", "a2", "u3"}; !slices.Equal(got, want) {
 		t.Fatalf("loaded history = %v, want %v", got, want)
 	}
 	if got, want := loaded[0].Source, (message.Source{Type: agent.SourceTypeHistoryProvider, ID: "compaction-history"}); got != want {
