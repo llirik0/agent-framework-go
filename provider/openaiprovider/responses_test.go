@@ -8458,6 +8458,60 @@ func TestResponsesFunctionCallUsesToolCallsFinishReason_NonStreaming(t *testing.
 	}
 }
 
+func TestResponsesStreamingLifecycleAfterMessageDoesNotModifyMessage(t *testing.T) {
+	for _, status := range []string{"incomplete", "completed"} {
+		t.Run(status, func(t *testing.T) {
+			const input = `{"model":"gpt-4o-mini","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}`
+			output := `event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"type":"message","id":"msg_real","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_real","output_index":0,"content_index":0,"delta":"Hello"}
+
+event: response.` + status + `
+data: {"type":"response.` + status + `","sequence_number":2,"response":{"id":"resp_real","object":"response","created_at":1758724519,"status":"` + status + `","model":"gpt-4o-mini","output":[]}}
+
+`
+			server := newTestResponsesServerStreaming(t, input, output)
+			defer server.Close()
+			a := newTestResponsesClient(server, "gpt-4o-mini")
+			resp := &agent.Response{}
+			var count int
+			for update, err := range a.RunText(t.Context(), "hello", agent.Stream(true)) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				count++
+				if count == 3 {
+					if update.Role != "" || update.AuthorName != "" || update.MessageID != "" {
+						t.Errorf("lifecycle update has message identity: role=%q author=%q id=%q", update.Role, update.AuthorName, update.MessageID)
+					}
+				}
+				resp.Update(update)
+			}
+			if count != 3 || len(resp.Messages) != 1 {
+				t.Fatalf("updates=%d messages=%d, want 3 and 1", count, len(resp.Messages))
+			}
+			msg := resp.Messages[0]
+			if msg.ID != "msg_real" || msg.Role != message.RoleAssistant || msg.String() != "Hello" {
+				t.Errorf("message changed: %#v", msg)
+			}
+			if !msg.CreatedAt.IsZero() {
+				t.Errorf("lifecycle timestamp leaked into message: %v", msg.CreatedAt)
+			}
+			if raw, ok := msg.RawRepresentation.([]any); !ok || len(raw) != 2 {
+				t.Errorf("message raw = %#v, want only item-added and text-delta events", msg.RawRepresentation)
+			}
+			if raw, ok := resp.RawRepresentation.([]any); !ok || len(raw) != 3 {
+				t.Errorf("response raw = %#v, want all three events", resp.RawRepresentation)
+			}
+			if resp.ID != "resp_real" || resp.CreatedAt.IsZero() {
+				t.Errorf("response metadata missing: %#v", resp)
+			}
+		})
+	}
+}
+
 func TestResponsesBackgroundResponses_StreamingLifecycleOnlyDoesNotCreateMessage(t *testing.T) {
 	const input = `{"model":"gpt-4o-2024-08-06","background":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"stream":true}`
 	const output = `event: response.created

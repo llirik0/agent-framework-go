@@ -1465,11 +1465,12 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 	}
 
 	// Lifecycle metadata belongs to the response, not the active message.
-	// Omit its MessageID without resetting the state used by content updates.
+	// Omit its Role and MessageID without resetting the state used by content updates.
 	var u *agent.ResponseUpdate
 	switch event := update.AsAny().(type) {
 	case responses.ResponseCreatedEvent:
 		u = createUpdate("", nil)
+		u.Role = ""
 		u.MessageID = ""
 		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
 		u.ResponseID = event.Response.ID
@@ -1480,6 +1481,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 
 	case responses.ResponseQueuedEvent:
 		u = createUpdate("", nil)
+		u.Role = ""
 		u.MessageID = ""
 		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
 		u.ResponseID = event.Response.ID
@@ -1490,6 +1492,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 
 	case responses.ResponseInProgressEvent:
 		u = createUpdate("", nil)
+		u.Role = ""
 		u.MessageID = ""
 		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
 		u.ResponseID = event.Response.ID
@@ -1517,6 +1520,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 
 	case responses.ResponseCompletedEvent:
 		u = createUpdate("", nil)
+		u.Role = ""
 		u.MessageID = ""
 		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
 		u.ResponseID = event.Response.ID
@@ -1532,6 +1536,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 
 	case responses.ResponseIncompleteEvent:
 		u = createUpdate("", nil)
+		u.Role = ""
 		u.MessageID = ""
 		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
 		u.ResponseID = event.Response.ID
@@ -1543,6 +1548,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 
 	case responses.ResponseFailedEvent:
 		u = createUpdate("", nil)
+		u.Role = ""
 		u.MessageID = ""
 		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
 		u.ResponseID = event.Response.ID
